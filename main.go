@@ -1,8 +1,8 @@
 // Copyright 2026 Proxi projekt d.o.o.
 // SPDX-License-Identifier: GPL-3.0-only
 
-// ccs browses Claude Code sessions by project: view one as markdown, open it
-// in VS Code, or delete it.
+// ccs browses Claude Code sessions by project: view one as markdown, resume
+// it, open it in VS Code, or delete it.
 package main
 
 import (
@@ -10,16 +10,31 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 )
 
+// version is set by release builds; go install leaves it to the module version.
+var version = ""
+
 func main() {
 	all := flag.Bool("a", false, "start at the project list even inside a project")
+	showVersion := flag.Bool("v", false, "print the version and exit")
 	flag.Parse()
 
-	projects, err := scanAll()
+	if *showVersion {
+		v := version
+		if bi, ok := debug.ReadBuildInfo(); ok && v == "" {
+			v = bi.Main.Version
+		}
+		fmt.Println("ccs", v)
+		return
+	}
+	timeLayout = layoutFor(userRegion())
+
+	projects, err := scanAll(nil)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ccs:", err)
 		os.Exit(1)
@@ -34,6 +49,13 @@ func main() {
 	if wd, err := os.Getwd(); err == nil && !*all {
 		enc := strings.NewReplacer("/", "-", ".", "-").Replace(wd)
 		startIn = filepath.Join(claudeDir(), "projects", enc)
+		for _, p := range projects { // the cwd its sessions recorded is the surer match
+			for _, s := range p.Sessions {
+				if s.Cwd == wd {
+					startIn = p.Dir
+				}
+			}
+		}
 	}
 
 	if _, err := tea.NewProgram(newModel(projects, startIn)).Run(); err != nil {

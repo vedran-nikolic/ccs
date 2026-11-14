@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
@@ -118,6 +119,7 @@ func newList(title string, extra ...key.Binding) list.Model {
 var (
 	keyOpen   = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open"))
 	keyView   = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "view"))
+	keyResume = key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "resume"))
 	keyCode   = key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "VS Code"))
 	keyDelete = key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete"))
 	keyBack   = key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "back"))
@@ -142,6 +144,21 @@ type model struct {
 	sessList list.Model
 	confirm  *Session // pending delete, waiting for y/N
 	footer   string
+	gen      int // bumped by every delete, so a scan started before it is dropped
+}
+
+// The lists follow what other terminals do: every refreshEvery the session
+// folders are checked again. That is a stat per transcript plus a read of
+// whatever was appended (see scanSession), so it stays cheap with thousands
+// of sessions. Polling, not file watching: on macOS a watcher holds a file
+// descriptor per transcript, and it would fire constantly for a session that
+// is being written.
+const refreshEvery = 2 * time.Second
+
+type tickMsg struct{}
+
+func tick() tea.Cmd {
+	return tea.Tick(refreshEvery, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
 type execDoneMsg struct {
@@ -152,12 +169,28 @@ type execDoneMsg struct {
 type rescannedMsg struct {
 	projects []*Project
 	err      error
+	gen      int
+	manual   bool // asked for with r, not the periodic refresh
+}
+
+// scan reads the sessions in the background. The periodic one reuses what is
+// already known; r reads every transcript from the start.
+func (m *model) scan(manual bool) tea.Cmd {
+	var known map[string]Session
+	if !manual {
+		known = knownSessions(m.projects)
+	}
+	gen := m.gen
+	return func() tea.Msg {
+		p, err := scanAll(known)
+		return rescannedMsg{p, err, gen, manual}
+	}
 }
 
 func newModel(projects []*Project, startIn string) model {
 	m := model{
 		projList: newList("Claude Code sessions", keyOpen, keyRescan, keyQuit),
-		sessList: newList("", keyView, keyCode, keyDelete, keyBack, keyQuit),
+		sessList: newList("", keyView, keyResume, keyCode, keyDelete, keyBack, keyQuit),
 	}
 	m.projList.SetStatusBarItemName("project", "projects")
 	m.sessList.SetStatusBarItemName("session", "sessions")
@@ -219,7 +252,97 @@ func (m *model) selectedSession() *Session {
 	return nil
 }
 
-func (m model) Init() tea.Cmd { return nil }
+// refresh shows the result of a scan without disturbing what the user is
+// doing: the cursor stays on the same project and session, and a filter or a
+// pending delete prompt stays up.
+func (m *model) refresh(projects []*Project) tea.Cmd {
+	if sameShape(m.projects, projects) {
+		// Nothing was added, removed or reordered: update the rows in place.
+		// The lists keep their items, so nothing flickers.
+		for i, p := range projects {
+			for j, s := range p.Sessions {
+				*m.projects[i].Sessions[j] = *s
+			}
+		}
+		return nil
+	}
+
+	var selProj, selSess, curDir, confirmID string
+	if it, ok := m.projList.SelectedItem().(projectItem); ok {
+		selProj = it.p.Dir
+	}
+	if s := m.selectedSession(); s != nil {
+		selSess = s.ID
+	}
+	if m.cur != nil {
+		curDir = m.cur.Dir
+	}
+	if m.confirm != nil {
+		confirmID = m.confirm.ID
+	}
+
+	cmd := m.setProjects(projects)
+	m.cur, m.confirm = nil, nil
+	for i, p := range projects {
+		if p.Dir == selProj && !m.projList.IsFiltered() {
+			m.projList.Select(i)
+		}
+		if p.Dir == curDir {
+			m.cur = p
+		}
+	}
+	clampCursor(&m.projList)
+	if m.cur == nil { // the open project lost its last session
+		m.screen = projectsScreen
+		return cmd
+	}
+	cmd = tea.Batch(cmd, m.setSessions())
+	for i, s := range m.cur.Sessions {
+		if s.ID == selSess && !m.sessList.IsFiltered() {
+			m.sessList.Select(i)
+		}
+		if s.ID == confirmID {
+			m.confirm = s
+		}
+	}
+	clampCursor(&m.sessList)
+	return cmd
+}
+
+// sameShape reports whether two scans list the same sessions in the same order.
+func sameShape(a, b []*Project) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Dir != b[i].Dir || len(a[i].Sessions) != len(b[i].Sessions) {
+			return false
+		}
+		for j := range a[i].Sessions {
+			if a[i].Sessions[j].ID != b[i].Sessions[j].ID {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func clampCursor(l *list.Model) {
+	if n := len(l.VisibleItems()); n > 0 && l.Index() >= n {
+		l.Select(n - 1)
+	}
+}
+
+// livePID checks right now whether a Claude Code process has the session
+// open, not as of the last scan.
+func livePID(s *Session) int {
+	if pid := liveSessions()[s.ID]; pid != 0 {
+		return pid
+	}
+	return s.LivePID
+}
+
+func (m model) Init() tea.Cmd { return tick() }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -234,21 +357,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case tickMsg:
+		return m, m.scan(false)
+
 	case rescannedMsg:
-		if msg.err != nil {
-			m.footer = "rescan: " + msg.err.Error()
-			return m, nil
+		var next tea.Cmd
+		if !msg.manual {
+			next = tick() // the next check starts only once this one is done
 		}
-		prev := m.cur
-		cmd := m.setProjects(msg.projects)
-		m.screen, m.cur = projectsScreen, nil
-		for _, p := range msg.projects {
-			if prev != nil && p.Dir == prev.Dir {
-				cmd = tea.Batch(cmd, m.openProject(p))
+		switch {
+		case msg.err != nil:
+			if msg.manual {
+				m.footer = "rescan: " + msg.err.Error()
+			}
+		case msg.gen != m.gen:
+			// a session was deleted while this scan ran; it may still list it
+		default:
+			next = tea.Batch(next, m.refresh(msg.projects))
+			if msg.manual {
+				m.footer = "rescanned"
 			}
 		}
-		m.footer = "rescanned"
-		return m, cmd
+		return m, next
 
 	case tea.KeyPressMsg:
 		if m.confirm != nil {
@@ -272,10 +402,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q":
 			return m, tea.Quit
 		case "r":
-			return m, func() tea.Msg {
-				p, err := scanAll()
-				return rescannedMsg{p, err}
-			}
+			return m, m.scan(true)
 		case "enter", "right", "l":
 			if m.screen == projectsScreen {
 				if it, ok := m.projList.SelectedItem().(projectItem); ok {
@@ -302,11 +429,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "D", "d", "delete":
 			if s := m.selectedSession(); m.screen == sessionsScreen && s != nil {
-				if s.LivePID != 0 {
-					m.footer = fmt.Sprintf("%s is open in a running Claude Code (pid %d); exit it first", s.ID[:8], s.LivePID)
+				if pid := livePID(s); pid != 0 {
+					m.footer = fmt.Sprintf("%s is open in a running Claude Code (pid %d); exit it first", s.ID[:8], pid)
 				} else {
 					m.confirm = s
 				}
+			}
+			return m, nil
+		case "c":
+			if s := m.selectedSession(); m.screen == sessionsScreen && s != nil {
+				return m, m.resume(s)
 			}
 			return m, nil
 		case "o":
@@ -369,7 +501,28 @@ func (m *model) view(s *Session) tea.Cmd {
 	})
 }
 
-// openInCode writes the markdown where ccview_md does and opens it in VS Code.
+// resume hands the terminal to `claude --resume` in the session's own
+// directory; ccs comes back when Claude Code exits.
+func (m *model) resume(s *Session) tea.Cmd {
+	if pid := livePID(s); pid != 0 {
+		m.footer = fmt.Sprintf("%s is already open in a running Claude Code (pid %d)", s.ID[:8], pid)
+		return nil
+	}
+	if _, err := os.Stat(s.Cwd); s.Cwd == "" || err != nil {
+		m.footer = "cannot resume: its directory " + tildify(s.Cwd) + " is gone"
+		return nil
+	}
+	bin, err := exec.LookPath("claude")
+	if err != nil {
+		m.footer = "cannot resume: claude is not on PATH"
+		return nil
+	}
+	c := exec.Command(bin, "--resume", s.ID)
+	c.Dir = s.Cwd
+	return tea.ExecProcess(c, func(err error) tea.Msg { return execDoneMsg{"claude", err} })
+}
+
+// openInCode writes the markdown to the temp dir and opens it in VS Code.
 func (m *model) openInCode(s *Session) {
 	md, err := s.Markdown()
 	if err != nil {
@@ -389,6 +542,12 @@ func (m *model) openInCode(s *Session) {
 }
 
 func (m *model) deleteSession(s *Session) tea.Cmd {
+	// Checked again here: Claude Code may have opened it while the prompt was up.
+	if pid := livePID(s); pid != 0 {
+		m.footer = fmt.Sprintf("%s is open in a running Claude Code (pid %d); not deleted", s.ID[:8], pid)
+		return nil
+	}
+	m.gen++
 	gone, err := s.Delete()
 	if err != nil {
 		m.footer = fmt.Sprintf("delete failed after %d paths: %v", len(gone), err)

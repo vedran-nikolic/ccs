@@ -6,6 +6,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ func fixture(t *testing.T) string {
 
 func TestScan(t *testing.T) {
 	fixture(t)
-	projects, err := scanAll()
+	projects, err := scanAll(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +93,7 @@ func TestScan(t *testing.T) {
 
 func TestMarkdown(t *testing.T) {
 	fixture(t)
-	s, _ := scanSession(filepath.Join(claudeDir(), "projects/-work-app", idRenamed+".jsonl"))
+	s, _ := scanSession(filepath.Join(claudeDir(), "projects/-work-app", idRenamed+".jsonl"), nil)
 	md, err := s.Markdown()
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +169,7 @@ func screenText(m model) string { return ansi.Strip(m.View().Content) }
 
 func TestUI(t *testing.T) {
 	root := fixture(t)
-	projects, _ := scanAll()
+	projects, _ := scanAll(nil)
 	m := newModel(projects, "")
 	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 20})
 
@@ -240,5 +241,166 @@ func TestUI(t *testing.T) {
 	m = send(t, m, press("left"))
 	if m.screen != projectsScreen {
 		t.Error("left should go back to projects")
+	}
+}
+
+func appendTo(t *testing.T, path, text string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(text); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A second scan reads only what was appended, and still sees a new title.
+func TestIncrementalScan(t *testing.T) {
+	root := fixture(t)
+	path := filepath.Join(root, "projects/-work-app", idAI+".jsonl")
+	first, err := scanSession(path, nil)
+	if err != nil || first.Title != "Dark mode toggle" {
+		t.Fatalf("first scan: %+v %v", first, err)
+	}
+	if again, _ := scanSession(path, first); again.scanned != first.scanned || again.Title != first.Title {
+		t.Errorf("unchanged file should be returned as it was: %+v", again)
+	}
+
+	// a rename arrives, followed by a line that is still being written
+	appendTo(t, path, `{"type":"custom-title","customTitle":"Theme work"}`+"\n"+`{"type":"custom-title","customTi`)
+	second, _ := scanSession(path, first)
+	if second.Title != "Theme work" || second.Kind != Renamed || second.FirstPrompt != "add dark mode" {
+		t.Errorf("appended rename not picked up, or earlier fields lost: %+v", second)
+	}
+	if st, _ := os.Stat(path); second.scanned >= st.Size() || second.scanned <= first.scanned {
+		t.Errorf("offset should stop before the half-written line: %d of %d", second.scanned, st.Size())
+	}
+	appendTo(t, path, `tle":"Final name"}`+"\n")
+	if third, _ := scanSession(path, second); third.Title != "Final name" {
+		t.Errorf("line completed later should be read whole: %+v", third)
+	}
+
+	// a file that shrank was rewritten: nothing from before may survive
+	os.WriteFile(path, []byte(`{"type":"ai-title","aiTitle":"New"}`+"\n"), 0o644)
+	if fresh, _ := scanSession(path, second); fresh.Title != "New" || fresh.FirstPrompt != "" {
+		t.Errorf("rewritten file should be scanned afresh: %+v", fresh)
+	}
+}
+
+// Sessions started elsewhere show up on refresh without moving the cursor.
+func TestRefresh(t *testing.T) {
+	root := fixture(t)
+	projects, _ := scanAll(nil)
+	startIn := filepath.Join(root, "projects/-work-app")
+	m := newModel(projects, startIn)
+	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 20}, press("down"))
+	sel := m.selectedSession().ID
+
+	// in place: a rename in another terminal, same sessions in the same order
+	old := time.Now().Add(-time.Hour)
+	for _, s := range m.cur.Sessions {
+		os.Chtimes(s.Path, old, old)
+	}
+	m = send(t, m, m.scan(false)())
+	itemsBefore := m.sessList.Items()
+	path := filepath.Join(startIn, sel+".jsonl")
+	appendTo(t, path, `{"type":"custom-title","customTitle":"Renamed elsewhere"}`+"\n")
+	os.Chtimes(path, old, old)
+	m = send(t, m, m.scan(false)())
+	if !strings.Contains(screenText(m), "Renamed elsewhere") {
+		t.Errorf("rename should show after a refresh:\n%s", screenText(m))
+	}
+	if &itemsBefore[0] != &m.sessList.Items()[0] {
+		t.Error("an unchanged set of sessions should be updated in place")
+	}
+
+	// a new session appears on top; the cursor stays on the same session
+	const idNew = "55555555-5555-5555-5555-555555555555"
+	os.WriteFile(filepath.Join(startIn, idNew+".jsonl"),
+		[]byte(`{"type":"user","cwd":"/work/app","message":{"content":"started in another terminal"}}`+"\n"), 0o644)
+	m = send(t, m, m.scan(false)())
+	if !strings.Contains(screenText(m), "started in another terminal") {
+		t.Errorf("new session should show after a refresh:\n%s", screenText(m))
+	}
+	if got := m.selectedSession(); got == nil || got.ID != sel {
+		t.Errorf("cursor should stay on %s, got %+v", sel, got)
+	}
+
+	// a result from before a delete is dropped
+	stale := m.scan(false)()
+	m.sessList.Select(0)
+	m = send(t, m, press("D"), press("y"), stale)
+	if strings.Contains(screenText(m), "started in another terminal") {
+		t.Errorf("a scan started before the delete must not bring the session back:\n%s", screenText(m))
+	}
+
+	// the open project disappears: back to the project list
+	for _, s := range m.cur.Sessions {
+		os.Remove(s.Path)
+	}
+	m = send(t, m, m.scan(false)())
+	if m.screen != projectsScreen || m.cur != nil || strings.Contains(screenText(m), "/work/app") {
+		t.Errorf("a project with no sessions left should close:\n%s", screenText(m))
+	}
+}
+
+// Claude Code opening the session while the y/N prompt is up stops the delete.
+func TestDeleteChecksLivenessAgain(t *testing.T) {
+	root := fixture(t)
+	projects, _ := scanAll(nil)
+	m := newModel(projects, filepath.Join(root, "projects/-work-lib"))
+	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 20}, press("D"))
+	if m.confirm == nil {
+		t.Fatal("expected the delete prompt")
+	}
+	os.MkdirAll(filepath.Join(root, "sessions"), 0o755)
+	os.WriteFile(filepath.Join(root, "sessions/1.json"),
+		[]byte(`{"pid":`+strconv.Itoa(os.Getpid())+`,"sessionId":"`+idOther+`"}`), 0o644)
+	m = send(t, m, press("y"))
+	if _, err := os.Stat(filepath.Join(root, "projects/-work-lib", idOther+".jsonl")); err != nil {
+		t.Error("a session opened during the prompt must not be deleted")
+	}
+	if !strings.Contains(screenText(m), "not deleted") {
+		t.Errorf("expected a refusal:\n%s", screenText(m))
+	}
+
+	// and it cannot be resumed a second time either
+	m = send(t, m, press("c"))
+	if !strings.Contains(screenText(m), "already open") {
+		t.Errorf("resume of a running session should be refused:\n%s", screenText(m))
+	}
+}
+
+func TestLocale(t *testing.T) {
+	for locale, want := range map[string]string{
+		"hr_HR.UTF-8":     "HR",
+		"en_US@rg=hrzzzz": "HR", // macOS: English with Croatian formats
+		"en_US.UTF-8":     "US",
+		"sr_Latn_RS":      "RS",
+		"de-CH":           "CH",
+		"C":               "",
+		"C.UTF-8":         "",
+		"POSIX":           "",
+		"en":              "",
+		"":                "",
+	} {
+		if got := regionOf(locale); got != want {
+			t.Errorf("regionOf(%q) = %q, want %q", locale, got, want)
+		}
+	}
+	at := time.Date(2026, 11, 14, 15, 4, 0, 0, time.UTC)
+	for region, want := range map[string]string{
+		"HR": "14.11.2026 15:04",
+		"US": "11/14/2026 03:04 PM",
+		"GB": "14/11/2026 15:04",
+		"SE": "2026-11-14 15:04",
+		"":   "2026-11-14 15:04",
+		"XX": "2026-11-14 15:04",
+	} {
+		if got := at.Format(layoutFor(region)); got != want {
+			t.Errorf("layoutFor(%q) gives %q, want %q", region, got, want)
+		}
 	}
 }

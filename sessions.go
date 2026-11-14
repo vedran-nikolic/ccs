@@ -42,6 +42,11 @@ type Session struct {
 	FirstPrompt string
 	Cwd         string
 	LivePID     int // non-zero while a Claude Code process has it open
+
+	// Scan state, so a transcript that grew is read from where the last scan
+	// stopped instead of from the start.
+	scanned    int64 // bytes of complete lines already read
+	custom, ai string
 }
 
 type Project struct {
@@ -168,58 +173,90 @@ func eachLine(path string, fn func([]byte) bool) error {
 var (
 	markCustom = []byte(`"custom-title"`)
 	markAI     = []byte(`"ai-title"`)
-	markUser   = []byte(`"type":"user"`)
+	markUser   = []byte(`"user"`)
 )
 
-func scanSession(path string) (*Session, error) {
+// scanSession reads a transcript's title, first prompt and cwd. Given the
+// result of an earlier scan it only reads what was appended since (transcripts
+// are append-only), which is what keeps the periodic refresh cheap.
+func scanSession(path string, prev *Session) (*Session, error) {
 	st, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
-	s := &Session{
-		ID:       strings.TrimSuffix(filepath.Base(path), ".jsonl"),
-		Path:     path,
-		Modified: st.ModTime(),
-		Size:     st.Size(),
+	s := &Session{ID: strings.TrimSuffix(filepath.Base(path), ".jsonl"), Path: path}
+	if prev != nil && st.Size() >= prev.scanned {
+		*s = *prev // a smaller file was rewritten: start over
 	}
-	var custom, ai string
-	err = eachLine(path, func(line []byte) bool {
-		// cheap byte checks first; only parse lines that can matter
-		if !bytes.Contains(line, markCustom) && !bytes.Contains(line, markAI) &&
-			(s.FirstPrompt != "" || !bytes.Contains(line, markUser)) {
-			return true
-		}
-		var r record
-		if json.Unmarshal(line, &r) != nil {
-			return true
-		}
-		switch r.Type {
-		case "custom-title":
-			if r.CustomTitle != "" {
-				custom = r.CustomTitle // the last rename wins
-			}
-		case "ai-title":
-			if r.AITitle != "" {
-				ai = r.AITitle
-			}
-		case "user":
-			if s.Cwd == "" {
-				s.Cwd = r.Cwd
-			}
-			if t := strings.TrimSpace(r.text()); s.FirstPrompt == "" && t != "" &&
-				!r.IsMeta && !strings.HasPrefix(t, "<") {
-				s.FirstPrompt = strings.Join(strings.Fields(t), " ")
+	unchanged := prev != nil && st.Size() == prev.Size && st.ModTime().Equal(prev.Modified)
+	s.Modified, s.Size, s.LivePID = st.ModTime(), st.Size(), 0
+	if unchanged {
+		return s, nil
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return s, err
+	}
+	defer f.Close()
+	if _, err := f.Seek(s.scanned, io.SeekStart); err != nil {
+		return s, err
+	}
+	// Lines can be megabytes long, hence no bufio.Scanner (see eachLine).
+	r := bufio.NewReaderSize(f, 1<<20)
+	for {
+		line, rerr := r.ReadBytes('\n')
+		if len(line) > 0 {
+			s.consume(line)
+			if line[len(line)-1] == '\n' { // a half-written last line is read again next time
+				s.scanned += int64(len(line))
 			}
 		}
-		return true
-	})
+		if rerr != nil {
+			if rerr != io.EOF {
+				err = rerr
+			}
+			break
+		}
+	}
 	switch {
-	case custom != "":
-		s.Title, s.Kind = custom, Renamed
-	case ai != "":
-		s.Title, s.Kind = ai, AITitle
+	case s.custom != "":
+		s.Title, s.Kind = s.custom, Renamed
+	case s.ai != "":
+		s.Title, s.Kind = s.ai, AITitle
 	}
 	return s, err
+}
+
+// consume takes what the session list needs from one transcript line.
+func (s *Session) consume(line []byte) {
+	// cheap byte checks first; only parse lines that can matter
+	if !bytes.Contains(line, markCustom) && !bytes.Contains(line, markAI) &&
+		(s.FirstPrompt != "" || !bytes.Contains(line, markUser)) {
+		return
+	}
+	var r record
+	if json.Unmarshal(line, &r) != nil {
+		return
+	}
+	switch r.Type {
+	case "custom-title":
+		if r.CustomTitle != "" {
+			s.custom = r.CustomTitle // the last rename wins
+		}
+	case "ai-title":
+		if r.AITitle != "" {
+			s.ai = r.AITitle
+		}
+	case "user":
+		if s.Cwd == "" {
+			s.Cwd = r.Cwd
+		}
+		if t := strings.TrimSpace(r.text()); s.FirstPrompt == "" && t != "" &&
+			!r.IsMeta && !strings.HasPrefix(t, "<") {
+			s.FirstPrompt = strings.Join(strings.Fields(t), " ")
+		}
+	}
 }
 
 // liveSessions maps session id to pid for Claude Code processes still running,
@@ -247,7 +284,8 @@ func liveSessions() map[string]int {
 }
 
 // scanAll reads every project, newest activity first, skipping empty ones.
-func scanAll() ([]*Project, error) {
+// known holds earlier results by transcript path; nil reads everything afresh.
+func scanAll(known map[string]Session) ([]*Project, error) {
 	root := filepath.Join(claudeDir(), "projects")
 	dirs, err := os.ReadDir(root)
 	if err != nil {
@@ -277,7 +315,11 @@ func scanAll() ([]*Project, error) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				s, err := scanSession(f)
+				var prev *Session
+				if k, ok := known[f]; ok {
+					prev = &k
+				}
+				s, err := scanSession(f, prev)
 				if s == nil || (err != nil && s.Size == 0) {
 					return
 				}
@@ -295,17 +337,39 @@ func scanAll() ([]*Project, error) {
 		if len(p.Sessions) == 0 {
 			continue
 		}
+		// ties broken by name, so the order is the same on every scan
 		sort.Slice(p.Sessions, func(i, j int) bool {
-			return p.Sessions[i].Modified.After(p.Sessions[j].Modified)
+			a, b := p.Sessions[i], p.Sessions[j]
+			if !a.Modified.Equal(b.Modified) {
+				return a.Modified.After(b.Modified)
+			}
+			return a.ID < b.ID
 		})
 		kept = append(kept, p)
 	}
-	sort.Slice(kept, func(i, j int) bool { return kept[i].Modified().After(kept[j].Modified()) })
+	sort.Slice(kept, func(i, j int) bool {
+		a, b := kept[i].Modified(), kept[j].Modified()
+		if !a.Equal(b) {
+			return a.After(b)
+		}
+		return kept[i].Dir < kept[j].Dir
+	})
 	return kept, nil
 }
 
-// Markdown renders the conversation the same way ccview does: one section per
-// message, text only.
+// knownSessions indexes projects for the next scanAll. It holds copies, so a
+// scan running in the background never reads what the UI is changing.
+func knownSessions(projects []*Project) map[string]Session {
+	known := map[string]Session{}
+	for _, p := range projects {
+		for _, s := range p.Sessions {
+			known[s.Path] = *s
+		}
+	}
+	return known
+}
+
+// Markdown renders the conversation: one section per message, text only.
 func (s *Session) Markdown() (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n\n`%s` · %s · %s\n\n---\n", s.Label(), s.ID, tildify(s.Cwd), fmtTime(s.Modified))
@@ -359,7 +423,7 @@ func tildify(p string) string {
 	return p
 }
 
-func fmtTime(t time.Time) string { return t.Format("02.01.2006 15:04") }
+func fmtTime(t time.Time) string { return t.Format(timeLayout) }
 
 func fmtSize(n int64) string {
 	switch {

@@ -1,21 +1,47 @@
 # ccs
 
 Browse Claude Code sessions in the terminal, grouped by project. View one as
-markdown, open it in VS Code, or delete it.
+markdown, resume it, open it in VS Code, or delete it.
 
 ![ccs demo: browse projects, read a session in glow, filter, delete](demo/demo.gif)
 
+## Install
+
+A prebuilt binary for macOS or Linux (Intel and ARM), no Go needed:
+
 ```sh
-go build -o ccs .      # or: go install
-ccs                    # inside a project dir: opens on its sessions
-ccs -a                 # always start at the project list
+os=$(uname -s | tr A-Z a-z); arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+curl -fsSL "https://github.com/vedran-nikolic/ccs/releases/latest/download/ccs_${os}_${arch}.tar.gz" | tar -xz
+sudo mv "ccs_${os}_${arch}/ccs" /usr/local/bin/
 ```
 
-Needs Go 1.27.4 or newer to build, and runs on macOS and Linux. Optional: `glow` for
-rendered markdown (otherwise `less -R`), and VS Code's `code` on `PATH` for `o`.
+Or with Go 1.27.4 or newer:
+
+```sh
+go install github.com/vedran-nikolic/ccs@latest
+```
+
+The macOS binaries are not signed. Downloaded with `curl` as above they run
+as they are; one downloaded with a browser is blocked by Gatekeeper until you
+run `xattr -d com.apple.quarantine ccs`.
+
+Optional: `glow` for rendered markdown (otherwise `less -R`), VS Code's `code`
+on `PATH` for `o`, and `claude` on `PATH` for `c`.
+
+## Use
+
+```sh
+ccs                    # inside a project dir: opens on its sessions
+ccs -a                 # always start at the project list
+ccs -v                 # print the version
+```
 
 "Inside a project dir" means the exact directory Claude Code was started in. A
 subdirectory starts at the project list.
+
+The lists stay current on their own: every two seconds ccs checks for sessions
+started, renamed, closed or removed in other terminals. The cursor stays on the
+session it was on, and a filter stays applied.
 
 ## Keys
 
@@ -25,10 +51,11 @@ subdirectory starts at the project list.
 | PgUp PgDn / b f | page | page |
 | `/` | fuzzy filter by path | fuzzy filter by title, first prompt or id |
 | Enter / → / l | open the project | view in `glow -p` (falls back to `less -R`) |
+| `c` | | resume in Claude Code (`claude --resume <id>`, in the session's directory) |
 | `o` | | write `$TMPDIR/<id>.md` and open it in VS Code |
 | `D` / `d` / Delete | | delete, after a y/N prompt |
 | ← / h / Backspace / Esc | | back (Esc clears a filter first) |
-| `r` | rescan | rescan, staying in the project |
+| `r` | reread everything | reread everything |
 | `?` | all keys | all keys |
 | `q` / Ctrl+C | quit | quit |
 
@@ -41,6 +68,11 @@ Sessions are `~/.claude/projects/<project>/<uuid>.jsonl` (or under
 `$CLAUDE_CONFIG_DIR`). Projects are sorted by their newest session, and sessions
 newest first. Projects with no transcripts are hidden.
 
+Dates follow your region: `14.11.2026 15:04` in Croatia, `11/14/2026 03:04 PM`
+in the US, ISO `2026-11-14 15:04` where the region is unknown. The region comes
+from `LC_ALL`, then `LC_TIME`, then on macOS the region in System Settings,
+then `LANG`.
+
 A project row shows the number of sessions, the last modified time and the
 working directory. A session row shows the full id, last modified time, file
 size and title:
@@ -51,7 +83,9 @@ size and title:
 
 A green `●` marks a session a running Claude Code process has open, and a
 project containing one. It comes from `~/.claude/sessions/<pid>.json`, with the
-pid checked for liveness.
+pid checked for liveness. `c` and `D` both refuse such a session.
+
+`c` hands the terminal to Claude Code; ccs is back when you exit it.
 
 The markdown has a heading per message with user and assistant text only. Tool
 calls, tool results and meta records are left out.
@@ -62,16 +96,18 @@ calls, tool results and meta records are left out.
 - its sibling folder `<uuid>/` (tool results, subagent transcripts, title)
 - `~/.claude/file-history/<uuid>` and `~/.claude/session-env/<uuid>`
 
-It refuses running sessions and never touches the project folder, so
-`memory/` survives even when the last session goes. The project then drops out
-of the list. Prompts typed in the session stay in `~/.claude/history.jsonl`
+It refuses running sessions, checking again at the moment you confirm, and
+never touches the project folder, so `memory/` survives even when the last
+session goes. The project then drops out of the list. Prompts typed in the session stay in `~/.claude/history.jsonl`
 (the prompt history).
 
 ## Tests
 
 `go test ./...` builds a fake `~/.claude` in a temp dir, checks scanning, title
-precedence and markdown, then drives the UI through filter, cancel, delete and
-the running-session guard.
+precedence, markdown and date formats, then drives the UI through filter,
+cancel, delete, the running-session guard and the background refresh.
+
+Pushing a `v*` tag builds the release archives (`.github/workflows/release.yml`).
 
 ## Demo
 

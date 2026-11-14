@@ -13,7 +13,7 @@ go build -o "$work/bin/ccs" ..
 sleep 3600 & live=$!   # stands in for a running Claude Code
 python3 fixture.py "$work/claude" "$live"
 
-PATH="$work/bin:$PATH" CLAUDE_CONFIG_DIR="$work/claude" TERM=xterm-256color LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
+PATH="$work/bin:$PATH" CLAUDE_CONFIG_DIR="$work/claude" TERM=xterm-256color LANG=en_GB.UTF-8 LC_ALL=en_GB.UTF-8 \
   asciinema rec --overwrite --quiet --headless --window-size 108x26 \
     --idle-time-limit 3 --title "ccs: browse Claude Code sessions" \
     --command "python3 drive.py" demo.cast
