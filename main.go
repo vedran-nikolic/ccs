@@ -1,3 +1,6 @@
+// Copyright 2026 Proxi projekt d.o.o.
+// SPDX-License-Identifier: GPL-3.0-only
+
 // ccs browses Claude Code sessions by project: view one as markdown, open it
 // in VS Code, or delete it.
 package main

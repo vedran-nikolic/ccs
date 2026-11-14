@@ -1,3 +1,6 @@
+// Copyright 2026 Proxi projekt d.o.o.
+// SPDX-License-Identifier: GPL-3.0-only
+
 package main
 
 import (
@@ -7,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
@@ -23,6 +27,20 @@ var (
 	boldStyle    = lipgloss.NewStyle().Bold(true)
 	warnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 	noteStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+
+	// The key hints at the bottom. bubbles defaults to fixed dark greys that
+	// almost vanish on a dark background; the terminal's own palette stays
+	// readable on any theme: keys in the normal text colour, the rest in the
+	// grey used for dates.
+	helpStyles = help.Styles{
+		ShortKey:       lipgloss.NewStyle(),
+		ShortDesc:      dimStyle,
+		ShortSeparator: dimStyle,
+		Ellipsis:       dimStyle,
+		FullKey:        lipgloss.NewStyle(),
+		FullDesc:       dimStyle,
+		FullSeparator:  dimStyle,
+	}
 )
 
 // ---------------------------------------------------------------- list rows
@@ -89,6 +107,7 @@ func newList(title string, extra ...key.Binding) list.Model {
 	l := list.New(nil, rowDelegate{}, 0, 0)
 	l.Title = title
 	l.DisableQuitKeybindings() // q, Esc and ←/→ are handled in Update
+	l.Help.Styles = helpStyles
 	l.KeyMap.PrevPage = key.NewBinding(key.WithKeys("pgup", "b"), key.WithHelp("pgup", "prev page"))
 	l.KeyMap.NextPage = key.NewBinding(key.WithKeys("pgdown", "f"), key.WithHelp("pgdn", "next page"))
 	l.AdditionalShortHelpKeys = func() []key.Binding { return extra }

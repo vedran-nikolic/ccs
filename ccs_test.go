@@ -1,3 +1,6 @@
+// Copyright 2026 Proxi projekt d.o.o.
+// SPDX-License-Identifier: GPL-3.0-only
+
 package main
 
 import (
