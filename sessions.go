@@ -41,7 +41,9 @@ type Session struct {
 	Kind        TitleKind
 	FirstPrompt string
 	Cwd         string
-	LivePID     int // non-zero while a Claude Code process has it open
+	LivePID     int    // non-zero while a Claude Code process has it open
+	LiveStatus  string // what that process is doing: "busy", "idle" or "waiting"
+	LiveWaiting string // when waiting: for what, e.g. a permission prompt
 
 	// Scan state, so a transcript that grew is read from where the last scan
 	// stopped instead of from the start.
@@ -87,13 +89,24 @@ func (p *Project) Modified() time.Time {
 	return t
 }
 
-func (p *Project) Live() bool {
+// Live reports whether any session is open in a running Claude Code, and the
+// status of the one that most needs attention: waiting, then idle, then busy.
+func (p *Project) Live() (live bool, status string) {
+	rank := func(st string) int {
+		switch st {
+		case "waiting":
+			return 3
+		case "busy":
+			return 1
+		}
+		return 2
+	}
 	for _, s := range p.Sessions {
-		if s.LivePID != 0 {
-			return true
+		if s.LivePID != 0 && (!live || rank(s.LiveStatus) > rank(status)) {
+			live, status = true, s.LiveStatus
 		}
 	}
-	return false
+	return live, status
 }
 
 // Label is what a session is called in lists and prompts.
@@ -189,7 +202,8 @@ func scanSession(path string, prev *Session) (*Session, error) {
 		*s = *prev // a smaller file was rewritten: start over
 	}
 	unchanged := prev != nil && st.Size() == prev.Size && st.ModTime().Equal(prev.Modified)
-	s.Modified, s.Size, s.LivePID = st.ModTime(), st.Size(), 0
+	s.Modified, s.Size = st.ModTime(), st.Size()
+	s.LivePID, s.LiveStatus, s.LiveWaiting = 0, "", ""
 	if unchanged {
 		return s, nil
 	}
@@ -259,10 +273,17 @@ func (s *Session) consume(line []byte) {
 	}
 }
 
-// liveSessions maps session id to pid for Claude Code processes still running,
+// Live is a Claude Code process that has a session open.
+type Live struct {
+	PID        int
+	Status     string
+	WaitingFor string
+}
+
+// liveSessions maps session id to the Claude Code process still running it,
 // from the registry Claude Code keeps in ~/.claude/sessions/<pid>.json.
-func liveSessions() map[string]int {
-	live := map[string]int{}
+func liveSessions() map[string]Live {
+	live := map[string]Live{}
 	files, _ := filepath.Glob(filepath.Join(claudeDir(), "sessions", "*.json"))
 	for _, f := range files {
 		b, err := os.ReadFile(f)
@@ -270,14 +291,16 @@ func liveSessions() map[string]int {
 			continue
 		}
 		var d struct {
-			PID       int    `json:"pid"`
-			SessionID string `json:"sessionId"`
+			PID        int    `json:"pid"`
+			SessionID  string `json:"sessionId"`
+			Status     string `json:"status"`
+			WaitingFor string `json:"waitingFor"`
 		}
 		if json.Unmarshal(b, &d) != nil || d.PID <= 0 || d.SessionID == "" {
 			continue
 		}
 		if err := syscall.Kill(d.PID, 0); err == nil || errors.Is(err, syscall.EPERM) {
-			live[d.SessionID] = d.PID
+			live[d.SessionID] = Live{d.PID, d.Status, d.WaitingFor}
 		}
 	}
 	return live
@@ -323,7 +346,8 @@ func scanAll(known map[string]Session) ([]*Project, error) {
 				if s == nil || (err != nil && s.Size == 0) {
 					return
 				}
-				s.LivePID = live[s.ID]
+				l := live[s.ID]
+				s.LivePID, s.LiveStatus, s.LiveWaiting = l.PID, l.Status, l.WaitingFor
 				mu.Lock()
 				p.Sessions = append(p.Sessions, s)
 				mu.Unlock()

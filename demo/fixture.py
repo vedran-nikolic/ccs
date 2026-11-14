@@ -114,7 +114,9 @@ for rel, sessions in PROJECTS.items():
         os.makedirs(os.path.join(pdir, sid, "tool-results"), exist_ok=True)
         os.makedirs(os.path.join(root, "file-history", sid), exist_ok=True)
 
-# the first webshop session is "open" in a running Claude Code
+# Two sessions are "open" in a running Claude Code: one busy, one idle.
 os.makedirs(os.path.join(root, "sessions"), exist_ok=True)
-with open(os.path.join(root, "sessions", f"{live_pid}.json"), "w") as f:
-    json.dump({"pid": live_pid, "sessionId": PROJECTS["code/webshop"][0][0]}, f)
+for name, status, sid in [("1", "busy", PROJECTS["code/webshop"][0][0]),
+                          ("2", "idle", PROJECTS["code/infra"][0][0])]:
+    with open(os.path.join(root, "sessions", name + ".json"), "w") as f:
+        json.dump({"pid": live_pid, "sessionId": sid, "status": status}, f)

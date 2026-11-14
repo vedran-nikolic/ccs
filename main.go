@@ -22,6 +22,7 @@ var version = ""
 func main() {
 	all := flag.Bool("a", false, "start at the project list even inside a project")
 	showVersion := flag.Bool("v", false, "print the version and exit")
+	noPreview := flag.Bool("no-preview", false, "start with the preview pane hidden (p shows it)")
 	flag.Parse()
 
 	if *showVersion {
@@ -58,7 +59,9 @@ func main() {
 		}
 	}
 
-	if _, err := tea.NewProgram(newModel(projects, startIn)).Run(); err != nil {
+	m := newModel(projects, startIn)
+	m.preview = !*noPreview
+	if _, err := tea.NewProgram(m).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "ccs:", err)
 		os.Exit(1)
 	}

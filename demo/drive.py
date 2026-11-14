@@ -15,7 +15,7 @@ import threading
 import time
 import fcntl
 
-ROWS, COLS = 26, 108
+ROWS, COLS = 30, 108
 out = sys.stdout.buffer
 
 # What a real terminal would answer. glow waits seconds for each otherwise.
@@ -55,6 +55,16 @@ def pump(fd):
         out.flush()
 
 
+# Pass ccs's output on untouched. Left in its default mode, the recorder's
+# terminal turns every line feed into CR+LF, which shifts the lines ccs draws
+# by moving the cursor straight down.
+try:
+    attrs = termios.tcgetattr(1)
+    attrs[1] &= ~termios.OPOST
+    termios.tcsetattr(1, termios.TCSANOW, attrs)
+except termios.error:
+    pass
+
 prompt("ccs -a")
 pid, fd = pty.fork()
 if pid == 0:
@@ -79,39 +89,47 @@ DOWN, ENTER, ESC = "j", "\r", "\x1b"
 
 time.sleep(2.2)
 
-# projects, newest first; ● = a session open in a running Claude Code
-key(DOWN, 0.5); key(DOWN, 0.5); key("k", 0.5); key("k", 0.8)
+# projects, newest first, with the latest sessions of each in the preview.
+# ● = open in a running Claude Code: yellow while it works, green when idle
+key(DOWN, 0.9); key(DOWN, 0.7); key("k", 0.5); key("k", 0.9)
 
-# open ~/code/webshop
-key(ENTER, 2.5)
+# open ~/code/webshop; the preview shows how each conversation ended
+key(ENTER, 2.2)
+key(DOWN, 1.3); key(DOWN, 1.3); key("k", 0.4); key("k", 0.8)
 
 # read the top session as markdown in glow, then come back
-key(ENTER, 2.6)
+key(ENTER, 2.4)
 for _ in range(5):
     key(DOWN, 0.25)
-time.sleep(1.2)
-key("q", 1.5)
+time.sleep(1.0)
+key("q", 1.3)
 
-# fuzzy filter by title, first prompt or id
-key("/", 0.5)
-type_("stripe")
-time.sleep(1.2)
-key(ENTER, 1.6)
-key(ESC, 1.4)
+# search the text of every session, and open one at the match
+key("s", 0.6)
+type_("refund")
+time.sleep(0.8)
+key(ENTER, 2.6)
+key(DOWN, 1.6)
+key(ENTER, 2.6)
+key("q", 1.2)
+key(ESC, 1.2)
 
 # the running session cannot be deleted
-key("k", 0.6)
-key("D", 2.8)
+key("D", 2.4)
 
 # delete the untitled one: n keeps it, y removes it
 key(DOWN, 0.4); key(DOWN, 0.4); key(DOWN, 0.8)
-key("D", 2.0)
-key("n", 1.4)
-key("D", 1.6)
-key("y", 2.8)
+key("D", 1.8)
+key("n", 1.2)
+key("D", 1.4)
+key("y", 2.4)
+
+# the preview can be hidden
+key("p", 1.6)
+key("p", 1.2)
 
 # back to the projects
-key(ESC, 1.8)
+key(ESC, 1.6)
 key("q", 0.5)
 
 os.waitpid(pid, 0)

@@ -1,9 +1,11 @@
 # ccs
 
-Browse Claude Code sessions in the terminal, grouped by project. View one as
-markdown, resume it, open it in VS Code, or delete it.
+Browse Claude Code sessions in the terminal, grouped by project. Search the
+text of all of them, see which running ones are waiting for you, preview how a
+conversation ended, then view it as markdown, resume it, open it in VS Code, or
+delete it.
 
-![ccs demo: browse projects, read a session in glow, filter, delete](demo/demo.gif)
+![ccs demo: browse projects with a preview, read a session, search all sessions, delete](demo/demo.gif)
 
 ## Install
 
@@ -33,6 +35,7 @@ on `PATH` for `o`, and `claude` on `PATH` for `c`.
 ```sh
 ccs                    # inside a project dir: opens on its sessions
 ccs -a                 # always start at the project list
+ccs -no-preview        # start with the preview pane hidden
 ccs -v                 # print the version
 ```
 
@@ -51,6 +54,8 @@ session it was on, and a filter stays applied.
 | PgUp PgDn / b f | page | page |
 | `/` | fuzzy filter by path | fuzzy filter by title, first prompt or id |
 | Enter / → / l | open the project | view in `glow -p` (falls back to `less -R`) |
+| `s` | search the text of all sessions | search the text of all sessions |
+| `p` | show or hide the preview | show or hide the preview |
 | `c` | | resume in Claude Code (`claude --resume <id>`, in the session's directory) |
 | `o` | | write `$TMPDIR/<id>.md` and open it in VS Code |
 | `D` / `d` / Delete | | delete, after a y/N prompt |
@@ -61,6 +66,23 @@ session it was on, and a filter stays applied.
 
 Results and errors (`deleted 0c9b7e24 (3 paths)`, `opened … in VS Code`,
 `kept`) show on the bottom line.
+
+## Search
+
+`/` narrows the list you are looking at by title. `s` looks through what was
+said: type some text and ccs lists every session, in any project, where you or
+Claude wrote it, ignoring case. Each result shows how many messages mention it
+and the text around the first one. Enter opens the conversation at that
+mention, and `c`, `o` and `D` work as in a session list. Esc goes back.
+
+Tool calls and tool output are not searched, only the conversation itself.
+
+## Preview
+
+The pane under the list shows what is under the cursor: a project's latest
+sessions, the last messages of a session, or the message a search found. `p`
+hides and shows it, `-no-preview` starts without it, and a window shorter than
+20 lines goes without.
 
 ## What it reads
 
@@ -81,9 +103,16 @@ size and title:
 - plain: the AI-generated title (`ai-title` record)
 - dimmed: neither, so the first prompt is shown instead
 
-A green `●` marks a session a running Claude Code process has open, and a
-project containing one. It comes from `~/.claude/sessions/<pid>.json`, with the
-pid checked for liveness. `c` and `D` both refuse such a session.
+A `●` marks a session a running Claude Code process has open, and a project
+containing one. Its colour says what that process is doing:
+
+- green: idle, so it is your turn
+- yellow: busy working
+- magenta: waiting on a prompt, such as a permission request
+
+The preview's top line says the same in words. This comes from
+`~/.claude/sessions/<pid>.json`, with the pid checked for liveness. `c` and `D`
+both refuse a running session.
 
 `c` hands the terminal to Claude Code; ccs is back when you exit it.
 
@@ -104,8 +133,9 @@ session goes. The project then drops out of the list. Prompts typed in the sessi
 ## Tests
 
 `go test ./...` builds a fake `~/.claude` in a temp dir, checks scanning, title
-precedence, markdown and date formats, then drives the UI through filter,
-cancel, delete, the running-session guard and the background refresh.
+precedence, markdown, search and date formats, then drives the UI through
+filter, cancel, delete, the running-session guard, the background refresh,
+search and the preview.
 
 Pushing a `v*` tag builds the release archives (`.github/workflows/release.yml`).
 

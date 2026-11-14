@@ -6,6 +6,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -157,7 +158,7 @@ func drain(cmd tea.Cmd) []tea.Msg {
 				all = append(all, drain(c)...)
 			}
 			return all
-		case list.FilterMatchesMsg:
+		case list.FilterMatchesMsg, searchDoneMsg:
 			return []tea.Msg{out}
 		}
 	case <-time.After(100 * time.Millisecond):
@@ -402,5 +403,129 @@ func TestLocale(t *testing.T) {
 		if got := at.Format(layoutFor(region)); got != want {
 			t.Errorf("layoutFor(%q) gives %q, want %q", region, got, want)
 		}
+	}
+}
+
+func TestSearch(t *testing.T) {
+	root := fixture(t)
+	os.WriteFile(filepath.Join(root, "projects/-work-lib", idOther+".jsonl"),
+		[]byte(`{"type":"user","cwd":"/work/lib","message":{"content":"Čekaj, što radi ovaj \"upit\"?"}}`+"\n"), 0o644)
+	projects, _ := scanAll(nil)
+	paths := map[string]string{}
+	for _, p := range projects {
+		for _, s := range p.Sessions {
+			paths[s.ID] = s.Path
+		}
+	}
+	ids := func(q string) string {
+		var got []string
+		for _, h := range searchAll(paths, q) {
+			got = append(got, h.ID[:1])
+		}
+		sort.Strings(got)
+		return strings.Join(got, "")
+	}
+	for q, want := range map[string]string{
+		"DARK mode":     "2",  // case is ignored
+		"done, see":     "13", // what Claude said counts too
+		"Bash":          "",   // tool calls do not
+		"local-command": "",   // nor do meta records
+		"čekaj":         "4",  // beyond ASCII
+		`"upit"`:        "4",  // text that is escaped in the file
+		"nowhere":       "",
+	} {
+		if got := ids(q); got != want {
+			t.Errorf("search %q found sessions %q, want %q", q, got, want)
+		}
+	}
+	h := searchAll(paths, "login")
+	if len(h) != 1 || h[0].Count != 1 || h[0].Who != "user" || h[0].Context != "fix the login bug" {
+		t.Errorf("hit should carry who said it and the text around it: %+v", h)
+	}
+}
+
+// s searches every session; the results can be previewed, deleted and left.
+func TestSearchUI(t *testing.T) {
+	root := fixture(t)
+	projects, _ := scanAll(nil)
+	m := newModel(projects, filepath.Join(root, "projects/-work-lib"))
+	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 30}, press("s"))
+	for _, r := range "done" {
+		m = send(t, m, press(string(r)))
+	}
+	if !strings.Contains(screenText(m), "Search all sessions: done") {
+		t.Fatalf("expected the search prompt:\n%s", screenText(m))
+	}
+	m = send(t, m, press("enter"))
+	s := screenText(m)
+	t.Logf("results:\n%s", s)
+	for _, want := range []string{"Search: done", "2 sessions", "Auth rework", "what does this script do", "/work/app", "preview", "Done, see above."} {
+		if !strings.Contains(s, want) {
+			t.Errorf("results screen missing %q", want)
+		}
+	}
+
+	m = send(t, m, press("p"))
+	if strings.Contains(screenText(m), "preview") {
+		t.Errorf("p should hide the preview:\n%s", screenText(m))
+	}
+	m = send(t, m, press("p"))
+
+	// a refresh that reorders the sessions keeps the results
+	touched := filepath.Join(root, "projects/-work-app", idAI+".jsonl")
+	later := time.Now().Add(time.Hour)
+	os.Chtimes(touched, later, later)
+	m = send(t, m, m.scan(false)())
+	if m.screen != resultsScreen || len(m.hitList.Items()) != 2 {
+		t.Errorf("results should survive a refresh:\n%s", screenText(m))
+	}
+
+	// delete one from the results; with the last one gone the screen closes
+	first := m.selectedSession()
+	m = send(t, m, press("D"), press("y"))
+	if _, err := os.Stat(first.Path); !os.IsNotExist(err) || len(m.hitList.Items()) != 1 {
+		t.Errorf("delete from the results should remove the session and its row:\n%s", screenText(m))
+	}
+	m = send(t, m, press("D"), press("y"))
+	if m.screen != sessionsScreen || m.cur == nil || m.cur.Name() != "/work/lib" {
+		t.Errorf("with no results left, back to where the search began:\n%s", screenText(m))
+	}
+
+	m = send(t, m, press("s"), press("x"), press("q"), press("z"), press("enter"))
+	if !strings.Contains(screenText(m), "no session mentions") {
+		t.Errorf("expected a note that nothing was found:\n%s", screenText(m))
+	}
+}
+
+// The preview shows how a conversation ended; short windows go without.
+func TestPreviewAndStatus(t *testing.T) {
+	root := fixture(t)
+	os.MkdirAll(filepath.Join(root, "sessions"), 0o755)
+	os.WriteFile(filepath.Join(root, "sessions/1.json"),
+		[]byte(`{"pid":`+strconv.Itoa(os.Getpid())+`,"sessionId":"`+idNone+`","status":"waiting","waitingFor":"permission"}`), 0o644)
+	projects, _ := scanAll(nil)
+	m := newModel(projects, filepath.Join(root, "projects/-work-app"))
+	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 30})
+	for range 5 {
+		if s := m.selectedSession(); s != nil && s.ID == idNone {
+			break
+		}
+		m = send(t, m, press("down"))
+	}
+	s := screenText(m)
+	for _, want := range []string{"running: waiting for permission", "You", "what does this", "Claude", "Done, see above."} {
+		if !strings.Contains(s, want) {
+			t.Errorf("preview missing %q:\n%s", want, s)
+		}
+	}
+	if live, status := m.cur.Live(); !live || status != "waiting" {
+		t.Errorf("project should report its waiting session: %v %q", live, status)
+	}
+	if lines := strings.Count(s, "\n") + 1; lines != 30 {
+		t.Errorf("the screen should fill the window exactly, got %d lines", lines)
+	}
+	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 15})
+	if s := screenText(m); strings.Contains(s, "Done, see above.") || strings.Count(s, "\n")+1 != 15 {
+		t.Errorf("a short window should drop the preview:\n%s", s)
 	}
 }
