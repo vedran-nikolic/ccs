@@ -35,7 +35,7 @@ on `PATH` for `o`, and `claude` on `PATH` for `c`.
 ```sh
 ccs                    # inside a project dir: opens on its sessions
 ccs -a                 # always start at the project list
-ccs -no-preview        # start with the preview pane hidden
+ccs -preview=right     # preview beside the list; also bottom, off, auto (default)
 ccs -v                 # print the version
 ```
 
@@ -56,6 +56,7 @@ session it was on, and a filter stays applied.
 | Enter / → / l | open the project | view in `glow -p` (falls back to `less -R`) |
 | `s` | search the text of all sessions | search the text of all sessions |
 | `p` | show or hide the preview | show or hide the preview |
+| `P` | move the preview: beside the list or under it | the same |
 | `c` | | resume in Claude Code (`claude --resume <id>`, in the session's directory) |
 | `o` | | write `$TMPDIR/<id>.md` and open it in VS Code |
 | `D` / `d` / Delete | | delete, after a y/N prompt |
@@ -79,10 +80,17 @@ Tool calls and tool output are not searched, only the conversation itself.
 
 ## Preview
 
-The pane under the list shows what is under the cursor: a project's latest
-sessions, the last messages of a session, or the message a search found. `p`
-hides and shows it, `-no-preview` starts without it, and a window shorter than
-20 lines goes without.
+The preview pane shows what is under the cursor: a project's latest sessions,
+the last messages of a session, or the message a search found.
+
+It goes where the window has room for it. From 150 columns up it stands beside
+the list and runs the full height; in a narrower window it lies under the list
+and takes two fifths of the height. `P` moves it to the other side and keeps it
+there, and `-preview=right` or `-preview=bottom` starts that way.
+
+`p` hides and shows it, and `-preview=off` (or `-no-preview`) starts without
+it. A window too small goes without: under 20 lines for the pane below, under
+80 columns for the pane beside.
 
 ## What it reads
 

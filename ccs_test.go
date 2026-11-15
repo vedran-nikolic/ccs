@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -527,5 +528,86 @@ func TestPreviewAndStatus(t *testing.T) {
 	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 15})
 	if s := screenText(m); strings.Contains(s, "Done, see above.") || strings.Count(s, "\n")+1 != 15 {
 		t.Errorf("a short window should drop the preview:\n%s", s)
+	}
+}
+
+// A wide window puts the preview beside the list; P moves it and pins it.
+func TestPreviewPlacement(t *testing.T) {
+	root := fixture(t)
+	projects, _ := scanAll(nil)
+	m := newModel(projects, filepath.Join(root, "projects/-work-app"))
+
+	check := func(what string, want placement, w, h int) {
+		t.Helper()
+		s := screenText(m)
+		if got := m.paneAt(); got != want {
+			t.Errorf("%s: preview at %d, want %d:\n%s", what, got, want, s)
+		}
+		lines := strings.Split(s, "\n")
+		if len(lines) != h {
+			t.Errorf("%s: %d lines, want %d:\n%s", what, len(lines), h, s)
+		}
+		for _, l := range lines {
+			// only the side layout is composed here; a bare list is bubbles' business
+			if want == placeRight && ansi.StringWidth(l) > w {
+				t.Errorf("%s: line wider than the window: %q", what, l)
+			}
+		}
+		if (want != placeNone) != strings.Contains(s, "preview · p hides") {
+			t.Errorf("%s: preview heading shown or missing wrongly:\n%s", what, s)
+		}
+		if side := strings.Contains(s, "│"); side != (want == placeRight) {
+			t.Errorf("%s: divider shown or missing wrongly:\n%s", what, s)
+		}
+	}
+
+	m = send(t, m, tea.WindowSizeMsg{Width: 200, Height: 50})
+	check("wide", placeRight, 200, 50)
+	t.Logf("wide:\n%s", screenText(m))
+	if m.sessList.Width() != 100 || m.sessList.Height() != 49 {
+		t.Errorf("list beside the preview is %dx%d, want 100x49", m.sessList.Width(), m.sessList.Height())
+	}
+	m = send(t, m, tea.WindowSizeMsg{Width: 200, Height: 12})
+	check("wide and short", placeRight, 200, 12)
+	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	check("narrow", placeBottom, 120, 40)
+
+	m = send(t, m, press("P")) // pinned right, though auto would put it below
+	check("P", placeRight, 120, 40)
+	m = send(t, m, tea.WindowSizeMsg{Width: 70, Height: 40})
+	check("pinned right, too narrow", placeNone, 70, 40)
+	m = send(t, m, press("p"), press("p"))
+	if !strings.Contains(screenText(m), "too narrow") {
+		t.Errorf("expected a note that the preview does not fit:\n%s", screenText(m))
+	}
+	m = send(t, m, tea.WindowSizeMsg{Width: 200, Height: 50}, press("P")) // pinned below in a wide window
+	check("P again", placeBottom, 200, 50)
+	m = send(t, m, press("p"))
+	check("hidden", placeNone, 200, 50)
+	m = send(t, m, press("P")) // P shows it again, on the other side
+	check("P while hidden", placeRight, 200, 50)
+
+	for in, want := range map[string]placement{"auto": placeAuto, "right": placeRight, "bottom": placeBottom, "off": placeAuto} {
+		if got, show, ok := parsePlacement(in); got != want || show != (in != "off") || !ok {
+			t.Errorf("parsePlacement(%q) = %d, %v, %v", in, got, show, ok)
+		}
+	}
+	if _, _, ok := parsePlacement("left"); ok {
+		t.Error("parsePlacement should refuse what it does not know")
+	}
+}
+
+// A tall pane shows more of each message and more messages.
+func TestPreviewTailScales(t *testing.T) {
+	var msgs []message
+	for i := range 20 {
+		msgs = append(msgs, message{"user", strings.Repeat(fmt.Sprintf("line %d\n", i), 30)})
+	}
+	short, tall := previewTail(msgs, 40, 11), previewTail(msgs, 40, 48)
+	if len(short) != 11 || len(tall) != 48 {
+		t.Errorf("preview should fill its pane without overflowing: %d of 11, %d of 48", len(short), len(tall))
+	}
+	if n := strings.Count(strings.Join(tall, "\n"), "line 19"); n != 15 {
+		t.Errorf("a 48 line pane should show 15 lines of the last message, got %d", n)
 	}
 }

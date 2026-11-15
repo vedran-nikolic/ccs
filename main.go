@@ -22,8 +22,14 @@ var version = ""
 func main() {
 	all := flag.Bool("a", false, "start at the project list even inside a project")
 	showVersion := flag.Bool("v", false, "print the version and exit")
-	noPreview := flag.Bool("no-preview", false, "start with the preview pane hidden (p shows it)")
+	where := flag.String("preview", "auto", "where the preview pane goes: auto, right, bottom or off (P moves it, p hides it)")
+	noPreview := flag.Bool("no-preview", false, "the same as -preview=off")
 	flag.Parse()
+	place, show, ok := parsePlacement(*where)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "ccs: -preview=%s: want auto, right, bottom or off\n", *where)
+		os.Exit(2)
+	}
 
 	if *showVersion {
 		v := version
@@ -60,7 +66,7 @@ func main() {
 	}
 
 	m := newModel(projects, startIn)
-	m.preview = !*noPreview
+	m.place, m.preview = place, show && !*noPreview
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "ccs:", err)
 		os.Exit(1)

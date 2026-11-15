@@ -128,8 +128,11 @@ key("y", 2.4)
 key("p", 1.6)
 key("p", 1.2)
 
-# back to the projects
+# back to the projects; P moves the preview beside the list, and back
 key(ESC, 1.6)
+key("P", 1.8)
+key(DOWN, 1.2); key(DOWN, 1.2); key("k", 0.4); key("k", 1.0)
+key("P", 1.6)
 key("q", 0.5)
 
 os.waitpid(pid, 0)

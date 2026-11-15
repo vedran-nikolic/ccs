@@ -195,6 +195,7 @@ var (
 	keyResume  = key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "resume"))
 	keySearch  = key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "search all"))
 	keyPreview = key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "preview"))
+	keySide    = key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "move preview"))
 	keyCode    = key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "VS Code"))
 	keyDelete  = key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete"))
 	keyBack    = key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "back"))
@@ -211,6 +212,31 @@ const (
 	sessionsScreen
 	resultsScreen // sessions that mention the search text
 )
+
+// placement is where the preview pane goes.
+type placement int
+
+const (
+	placeAuto   placement = iota // right in a wide window, otherwise below
+	placeRight                   // beside the list
+	placeBottom                  // under the list
+	placeNone                    // not shown
+)
+
+// parsePlacement reads the value of -preview.
+func parsePlacement(s string) (place placement, show, ok bool) {
+	switch s {
+	case "auto":
+		return placeAuto, true, true
+	case "right":
+		return placeRight, true, true
+	case "bottom":
+		return placeBottom, true, true
+	case "off":
+		return placeAuto, false, true
+	}
+	return placeAuto, true, false
+}
 
 type model struct {
 	projects []*Project
@@ -230,9 +256,10 @@ type model struct {
 	from      screen // where the search was started, for going back
 
 	width, height int
-	preview       bool     // the pane under the list is wanted
-	pvKey         string   // what pvLines was built for
-	pvLines       []string // its content
+	preview       bool      // the preview pane is wanted
+	place         placement // where: placeAuto until P or -preview picks a side
+	pvKey         string    // what pvLines was built for
+	pvLines       []string  // its content
 }
 
 // The lists follow what other terminals do: every refreshEvery the session
@@ -301,13 +328,13 @@ func newModel(projects []*Project, startIn string) model {
 	m := model{
 		projList: newList("Claude Code sessions", 1,
 			keys(keyOpen, keySearch, keyQuit),
-			keys(keyOpen, keySearch, keyPreview, keyRescan, keyQuit)),
+			keys(keyOpen, keySearch, keyPreview, keySide, keyRescan, keyQuit)),
 		sessList: newList("", 1,
 			keys(keyView, keyResume, keySearch, keyDelete, keyBack),
-			keys(keyView, keyResume, keyCode, keyDelete, keySearch, keyPreview, keyBack, keyRescan, keyQuit)),
+			keys(keyView, keyResume, keyCode, keyDelete, keySearch, keyPreview, keySide, keyBack, keyRescan, keyQuit)),
 		hitList: newList("", 2,
 			keys(keyView, keyResume, keySearch, keyBack),
-			keys(keyView, keyResume, keyCode, keyDelete, keySearch, keyPreview, keyBack, keyQuit)),
+			keys(keyView, keyResume, keyCode, keyDelete, keySearch, keyPreview, keySide, keyBack, keyQuit)),
 		preview: true,
 	}
 	m.projList.SetStatusBarItemName("project", "projects")
@@ -625,8 +652,18 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 			return m, nil
 		case "p":
 			m.preview = !m.preview
-			if m.preview && m.previewHeight() == 0 {
-				m.footer = "the window is too short for the preview"
+			if m.preview && m.paneAt() == placeNone {
+				m.footer = m.noRoom()
+			}
+			return m, nil
+		case "P": // the other side, and it stays there
+			was := m.fit(m.place)
+			m.preview, m.place = true, placeRight
+			if was == placeRight {
+				m.place = placeBottom
+			}
+			if m.paneAt() == placeNone {
+				m.footer = m.noRoom()
 			}
 			return m, nil
 		case "enter", "right", "l":
@@ -702,20 +739,74 @@ func (m model) typeSearch(msg tea.KeyPressMsg) (model, tea.Cmd) {
 
 // ---------------------------------------------------------------- layout
 
-// previewHeight is how many lines the preview pane gets, rule included: about
-// a third of the window, and none when it is off or the window is short.
-func (m *model) previewHeight() int {
-	if !m.preview || m.height < 20 {
-		return 0
+// A window this wide gets the preview beside the list unless told otherwise:
+// the list keeps 90 columns, enough for a session row with its title, and the
+// pane still has 59.
+const autoSideWidth = 150
+
+// fit is where the preview goes in this window when want is asked for:
+// placeNone when the window is too small for it.
+func (m *model) fit(want placement) placement {
+	right := m.width >= 80 && m.height >= 8
+	switch {
+	case want == placeRight && right, want == placeAuto && right && m.width >= autoSideWidth:
+		return placeRight
+	case want != placeRight && m.height >= 20:
+		return placeBottom
 	}
-	return min(max(m.height/3, 7), 16)
+	return placeNone
+}
+
+// paneAt is where the preview is right now.
+func (m *model) paneAt() placement {
+	if !m.preview {
+		return placeNone
+	}
+	return m.fit(m.place)
+}
+
+// noRoom says why the preview is wanted but not shown.
+func (m *model) noRoom() string {
+	if m.place == placeRight {
+		return "the window is too narrow for the preview on the right"
+	}
+	return "the window is too short for the preview"
+}
+
+// listWidth is what the list keeps with the preview beside it: three fifths
+// of the window up to 100 columns, and whatever a 120 column pane leaves over.
+func (m *model) listWidth() int {
+	return max(min(100, m.width*3/5), m.width-121)
+}
+
+// bottomHeight is how many lines the preview under the list gets, rule
+// included: two fifths of the window.
+func (m *model) bottomHeight() int {
+	return max(m.height*2/5, 7)
+}
+
+// paneSize is the room for preview text: columns and lines.
+func (m *model) paneSize() (w, h int) {
+	switch m.paneAt() {
+	case placeRight: // a column for the divider, one of padding on each side
+		return m.width - m.listWidth() - 3, m.height - 2
+	case placeBottom:
+		return max(m.width-4, 10), m.bottomHeight() - 1
+	}
+	return 0, 0
 }
 
 func (m *model) layout() {
-	h := m.height - 1 - m.previewHeight() // one line for the footer
+	w, h := m.width, m.height-1 // one line for the footer
+	switch m.paneAt() {
+	case placeRight:
+		w = m.listWidth()
+	case placeBottom:
+		h -= m.bottomHeight()
+	}
 	for _, l := range []*list.Model{&m.projList, &m.sessList, &m.hitList} {
-		if l.Width() != m.width || l.Height() != h {
-			l.SetSize(m.width, h)
+		if l.Width() != w || l.Height() != h {
+			l.SetSize(w, h)
 		}
 	}
 }
@@ -723,14 +814,13 @@ func (m *model) layout() {
 // syncPreview rebuilds the preview when the row under the cursor, its
 // transcript or the window changed.
 func (m *model) syncPreview() {
-	h := m.previewHeight() - 1
+	w, h := m.paneSize()
 	if h <= 0 {
 		m.pvKey, m.pvLines = "", nil
 		return
 	}
-	w := max(m.width-4, 10)
 	item := m.active().SelectedItem()
-	key := fmt.Sprint(m.screen, w, h)
+	key := fmt.Sprint(m.screen, m.paneAt(), w, h)
 	switch it := item.(type) {
 	case projectItem:
 		key += fmt.Sprint(it.p.Dir, len(it.p.Sessions), it.p.Modified().UnixNano())
@@ -755,7 +845,7 @@ func (m *model) syncPreview() {
 				dimStyle.Render(fmtTime(s.Modified)), sessionTitle(s, false)))
 		}
 	case sessionItem: // how the conversation ended
-		lines = previewTail(tail(it.s.Path, 12), w, h)
+		lines = previewTail(tail(it.s.Path, max(12, h)), w, h)
 	case hitItem: // the message that mentions the search text
 		lines = previewMessage(message{it.hit.Who, it.hit.Context}, it.query, w, h)
 	}
@@ -795,9 +885,9 @@ func wrapText(text string, w int) []string {
 }
 
 // previewTail fits the end of a conversation into h lines: the latest
-// messages, each cut to a few lines so more than one is visible.
+// messages, each cut to a share of the pane so more than one is visible.
 func previewTail(msgs []message, w, h int) []string {
-	const perMessage = 5
+	perMessage := max(5, h/3)
 	var blocks [][]string
 	used := 0
 	for i := len(msgs) - 1; i >= 0 && used < h; i-- {
@@ -812,11 +902,11 @@ func previewTail(msgs []message, w, h int) []string {
 		for _, l := range body {
 			block = append(block, "  "+l)
 		}
-		if len(block) > h-used {
-			if used > 0 {
+		if room := h - used; len(block) > room { // the oldest one shown gets what is left
+			if room < 3 {
 				break
 			}
-			block = block[:h]
+			block = append(block[:room-1], "  …")
 		}
 		used += len(block)
 		blocks = append(blocks, block)
@@ -850,28 +940,55 @@ func previewMessage(msg message, query string, w, h int) []string {
 	return lines
 }
 
+// pvRule is the line that heads the preview: what it is, or what the running
+// session under the cursor is doing, then a rule out to w columns.
+func (m model) pvRule(w int) string {
+	label := "── preview · p hides · P moves "
+	if s := m.selectedSession(); s != nil && s.LivePID != 0 {
+		state := s.LiveStatus
+		if s.LiveStatus == "waiting" && s.LiveWaiting != "" {
+			state = "waiting for " + s.LiveWaiting
+		}
+		if state == "" {
+			state = "open"
+		}
+		label = fmt.Sprintf("── running: %s (pid %d) · p hides · P moves ", state, s.LivePID)
+	}
+	rule := label + strings.Repeat("─", max(w-ansi.StringWidth(label), 0))
+	return dimStyle.Render(ansi.Truncate(rule, max(w, 0), ""))
+}
+
 func (m model) View() tea.View {
 	body := m.active().View()
-	if h := m.previewHeight(); h > 0 {
-		label := "── preview · p hides "
-		if s := m.selectedSession(); s != nil && s.LivePID != 0 {
-			state := s.LiveStatus
-			if s.LiveStatus == "waiting" && s.LiveWaiting != "" {
-				state = "waiting for " + s.LiveWaiting
-			}
-			if state == "" {
-				state = "open"
-			}
-			label = fmt.Sprintf("── running: %s (pid %d) · p hides ", state, s.LivePID)
-		}
-		rule := ansi.Truncate(label+strings.Repeat("─", max(m.width-2-ansi.StringWidth(label), 0)), max(m.width-2, 0), "")
-		body += "\n  " + dimStyle.Render(rule)
-		for i := 0; i < h-1; i++ {
+	switch m.paneAt() {
+	case placeBottom:
+		body += "\n  " + m.pvRule(m.width-2)
+		for i := 0; i < m.bottomHeight()-1; i++ {
 			body += "\n"
 			if i < len(m.pvLines) {
 				body += "  " + m.pvLines[i]
 			}
 		}
+	case placeRight: // the list, a divider, the preview
+		left := strings.Split(body, "\n")
+		lw := m.listWidth()
+		rows := make([]string, m.height-1)
+		for i := range rows {
+			l := ""
+			if i < len(left) {
+				l = ansi.Truncate(left[i], lw, "")
+			}
+			rows[i] = l + strings.Repeat(" ", max(lw-ansi.StringWidth(l), 0))
+			switch {
+			case i == 0:
+				rows[i] += dimStyle.Render("├") + m.pvRule(m.width-lw-1)
+			case i-1 < len(m.pvLines):
+				rows[i] += dimStyle.Render("│") + " " + m.pvLines[i-1]
+			default:
+				rows[i] += dimStyle.Render("│")
+			}
+		}
+		body = strings.Join(rows, "\n")
 	}
 
 	foot := noteStyle.Render(m.footer)
