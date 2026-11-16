@@ -48,25 +48,36 @@ session it was on, and a filter stays applied.
 
 ## Keys
 
-| Key | Projects | Sessions |
+| Key | Projects | Sessions and search results |
 |---|---|---|
 | ↑ ↓ / j k | move | move |
 | PgUp PgDn / b f | page | page |
+| Home End / g G | first, last | first, last |
 | `/` | fuzzy filter by path | fuzzy filter by title, first prompt or id |
-| Enter / → / l | open the project | view in `glow -p` (falls back to `less -R`) |
+| Enter / → / l | open the project | view in `glow -p` (falls back to `less -R`); from a search, at the mention |
 | `s` | search the text of all sessions | search the text of all sessions |
 | `p` | show or hide the preview | show or hide the preview |
 | `P` | move the preview: beside the list or under it | the same |
 | `c` | | resume in Claude Code (`claude --resume <id>`, in the session's directory) |
 | `o` | | write `$TMPDIR/<id>.md` and open it in VS Code |
 | `D` / `d` / Delete | | delete, after a y/N prompt |
-| ← / h / Backspace / Esc | | back (Esc clears a filter first) |
+| ← / h / Backspace / Esc | Esc clears a filter | back (Esc clears a filter first) |
 | `r` | reread everything | reread everything |
 | `?` | all keys | all keys |
 | `q` / Ctrl+C | quit | quit |
 
+`?` lists the keys that work where you are; the bottom of the window always
+shows the most used ones.
+
+While a `/` filter is being typed, every key goes into it: Enter keeps the
+filter and goes back to the list, Esc drops it. In the search prompt that
+`s` opens, Enter searches, Esc cancels, Backspace deletes a character, Ctrl+U
+clears the line, and pasted text goes in as one line.
+
+At the delete prompt, `y` deletes and any other key keeps the session.
+
 Results and errors (`deleted 0c9b7e24 (3 paths)`, `opened … in VS Code`,
-`kept`) show on the bottom line.
+`kept`, `searched 212 sessions in 38 ms`) show on the bottom line.
 
 ## Search
 
@@ -88,9 +99,15 @@ the list and runs the full height; in a narrower window it lies under the list
 and takes two fifths of the height. `P` moves it to the other side and keeps it
 there, and `-preview=right` or `-preview=bottom` starts that way.
 
+The pane is filled from the newest message back: each message gets up to a
+third of it, and the oldest one shown takes whatever room is left.
+
 `p` hides and shows it, and `-preview=off` (or `-no-preview`) starts without
 it. A window too small goes without: under 20 lines for the pane below, under
-80 columns for the pane beside.
+80 columns or 8 lines for the pane beside. A side picked with `P` or
+`-preview` is kept even then: the pane comes back when the window grows,
+instead of moving to the other side. Pressing `p` or `P` while there is no
+room says so on the bottom line.
 
 ## What it reads
 
@@ -143,7 +160,7 @@ session goes. The project then drops out of the list. Prompts typed in the sessi
 `go test ./...` builds a fake `~/.claude` in a temp dir, checks scanning, title
 precedence, markdown, search and date formats, then drives the UI through
 filter, cancel, delete, the running-session guard, the background refresh,
-search and the preview.
+search, and the preview, including which side it takes at each window size.
 
 Pushing a `v*` tag builds the release archives (`.github/workflows/release.yml`).
 
