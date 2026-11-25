@@ -60,6 +60,8 @@ session it was on, and a filter stays applied.
 | `P` | move the preview: beside the list or under it | the same |
 | `c` | | resume in Claude Code (`claude --resume <id>`, in the session's directory) |
 | `o` | | write `$TMPDIR/<id>.md` and open it in VS Code |
+| `t` | | add `[OPEN]` to the end of the title, or take it off |
+| `n` | | rename: edit the title on the bottom line |
 | `D` / `d` / Delete | | delete, after a y/N prompt |
 | ← / h / Backspace / Esc | Esc clears a filter | back (Esc clears a filter first) |
 | `r` | reread everything | reread everything |
@@ -73,6 +75,10 @@ While a `/` filter is being typed, every key goes into it: Enter keeps the
 filter and goes back to the list, Esc drops it. In the search prompt that
 `s` opens, Enter searches, Esc cancels, Backspace deletes a character, Ctrl+U
 clears the line, and pasted text goes in as one line.
+
+At the rename prompt that `n` opens, the current title is already typed in:
+Enter renames, Esc cancels, Backspace deletes a character, Ctrl+W a word and
+Ctrl+U the whole line.
 
 At the delete prompt, `y` deletes and any other key keeps the session.
 
@@ -88,6 +94,27 @@ and the text around the first one. Enter opens the conversation at that
 mention, and `c`, `o` and `D` work as in a session list. Esc goes back.
 
 Tool calls and tool output are not searched, only the conversation itself.
+
+## Open sessions and renaming
+
+Mark the sessions you left unfinished with `t`: it adds `[OPEN]` to the end of
+the title, and `t` again takes it off. A session without a title gets one
+from its first prompt. `/[open]` then lists only the open ones.
+
+`n` renames a session to anything you type.
+
+Both rename the way `/rename` in Claude Code does: they add a `custom-title`
+record to the transcript, which is where Claude Code takes the title from when
+the session is resumed, and update `<uuid>/custom-title.json` to match. The
+transcript keeps its modification time, so a renamed session stays where it
+was in the list.
+
+A session open in a running Claude Code cannot be renamed from ccs, since that
+process writes its own title back into the transcript. Use `/rename` there.
+
+Taking the tag off a session that only had an AI title leaves a rename equal
+to that title. ccs shows it as the plain AI title again; Claude Code's own
+`/resume` list counts it as renamed.
 
 ## Preview
 
@@ -124,7 +151,8 @@ A project row shows the number of sessions, the last modified time and the
 working directory. A session row shows the full id, last modified time, file
 size and title:
 
-- `✎ yellow`: renamed with `/rename` (the last `custom-title` record wins)
+- `✎ yellow`: renamed with `/rename`, `t` or `n` (the last `custom-title`
+  record wins; one equal to the AI title is shown as the AI title)
 - plain: the AI-generated title (`ai-title` record)
 - dimmed: neither, so the first prompt is shown instead
 
@@ -136,8 +164,8 @@ containing one. Its colour says what that process is doing:
 - magenta: waiting on a prompt, such as a permission request
 
 The preview's top line says the same in words. This comes from
-`~/.claude/sessions/<pid>.json`, with the pid checked for liveness. `c` and `D`
-both refuse a running session.
+`~/.claude/sessions/<pid>.json`, with the pid checked for liveness. `c`, `D`, `t`
+and `n` all refuse a running session.
 
 `c` hands the terminal to Claude Code; ccs is back when you exit it.
 

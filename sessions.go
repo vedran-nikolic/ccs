@@ -234,7 +234,8 @@ func scanSession(path string, prev *Session) (*Session, error) {
 		}
 	}
 	switch {
-	case s.custom != "":
+	// A rename back to the AI title (taking [OPEN] off one, say) is no rename.
+	case s.custom != "" && s.custom != s.ai:
 		s.Title, s.Kind = s.custom, Renamed
 	case s.ai != "":
 		s.Title, s.Kind = s.ai, AITitle
@@ -414,6 +415,128 @@ func (s *Session) Markdown() (string, error) {
 		return true
 	})
 	return b.String(), err
+}
+
+// OpenTag marks a session left unfinished, at the end of its title.
+const OpenTag = "[OPEN]"
+
+// IsOpen reports whether the title ends with OpenTag, in any case.
+func IsOpen(title string) bool {
+	t := strings.TrimSpace(title)
+	return len(t) >= len(OpenTag) && strings.EqualFold(t[len(t)-len(OpenTag):], OpenTag)
+}
+
+// ToggledOpen is the title with OpenTag added at the end or, when it is
+// there, taken off. A session without a title starts from its first prompt.
+func (s *Session) ToggledOpen() string {
+	t := strings.TrimSpace(s.Title)
+	if IsOpen(t) {
+		if t = strings.TrimSpace(t[:len(t)-len(OpenTag)]); t == "" {
+			t = s.ai
+		}
+		if t == "" {
+			t = shorten(s.FirstPrompt, 60)
+		}
+		return t
+	}
+	if t == "" {
+		t = shorten(s.FirstPrompt, 60)
+	}
+	return strings.TrimSpace(t + " " + OpenTag)
+}
+
+// shorten cuts text to at most n runes, at a space when there is one.
+func shorten(text string, n int) string {
+	r := []rune(text)
+	if len(r) <= n {
+		return text
+	}
+	cut := string(r[:n])
+	if i := strings.LastIndex(cut, " "); i > n/2 {
+		cut = cut[:i]
+	}
+	return cut + "…"
+}
+
+// Rename gives the session a new title the way /rename in Claude Code does.
+// Claude Code takes the title from the last custom-title record in the
+// transcript when the session is resumed, so that record is what counts;
+// <uuid>/custom-title.json is kept in step with it. The transcript keeps its
+// modification time: a new title is not new activity, and the session stays
+// where it was in the list.
+func (s *Session) Rename(title string) error {
+	title = strings.Join(strings.Fields(title), " ")
+	if title == "" {
+		return errors.New("the title is empty")
+	}
+	st, err := os.Stat(s.Path)
+	if err != nil {
+		return err
+	}
+	rec, err := compactJSON(struct {
+		Type        string `json:"type"`
+		CustomTitle string `json:"customTitle"`
+		SessionID   string `json:"sessionId"`
+	}{"custom-title", title, s.ID})
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(s.Path, os.O_RDWR|os.O_APPEND, 0)
+	if err != nil {
+		return err
+	}
+	// a transcript cut off mid-line would swallow the record
+	if last := make([]byte, 1); st.Size() > 0 {
+		if _, err := f.ReadAt(last, st.Size()-1); err == nil && last[0] != '\n' {
+			rec = append([]byte("\n"), rec...)
+		}
+	}
+	_, err = f.Write(append(rec, '\n'))
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	os.Chtimes(s.Path, time.Now(), st.ModTime())
+
+	side, err := compactJSON(struct {
+		CustomTitle string `json:"customTitle"`
+	}{title})
+	if err != nil {
+		return err
+	}
+	dir := strings.TrimSuffix(s.Path, ".jsonl")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".custom-title-*")
+	if err != nil {
+		return err
+	}
+	_, err = tmp.Write(side)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), filepath.Join(dir, "custom-title.json"))
+	}
+	if err != nil {
+		os.Remove(tmp.Name())
+	}
+	return err
+}
+
+// compactJSON is json.Marshal without escaping <, > and &, as Claude Code
+// writes them.
+func compactJSON(v any) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }
 
 // Delete removes the transcript and everything keyed by its id, returning the

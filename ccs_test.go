@@ -611,3 +611,139 @@ func TestPreviewTailScales(t *testing.T) {
 		t.Errorf("a 48 line pane should show 15 lines of the last message, got %d", n)
 	}
 }
+
+// Rename writes what /rename writes, and t adds and removes the open tag.
+func TestRename(t *testing.T) {
+	root := fixture(t)
+	dir := filepath.Join(root, "projects/-work-app")
+	path := filepath.Join(dir, idAI+".jsonl")
+	old := time.Now().Add(-time.Hour).Truncate(time.Second)
+	os.Chtimes(path, old, old)
+	s, _ := scanSession(path, nil)
+
+	if got := s.ToggledOpen(); got != "Dark mode toggle [OPEN]" {
+		t.Fatalf("toggle on: %q", got)
+	}
+	if err := s.Rename(s.ToggledOpen()); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if want := `{"type":"custom-title","customTitle":"Dark mode toggle [OPEN]","sessionId":"` + idAI + `"}` + "\n"; !strings.HasSuffix(string(b), want) {
+		t.Errorf("transcript should end with the record Claude Code writes:\n%s", b)
+	}
+	if side, _ := os.ReadFile(filepath.Join(dir, idAI, "custom-title.json")); string(side) != `{"customTitle":"Dark mode toggle [OPEN]"}` {
+		t.Errorf("custom-title.json: %s", side)
+	}
+	if st, _ := os.Stat(path); !st.ModTime().Equal(old) {
+		t.Errorf("modification time should be kept: %v, was %v", st.ModTime(), old)
+	}
+	s, _ = scanSession(path, s)
+	if s.Title != "Dark mode toggle [OPEN]" || s.Kind != Renamed || !IsOpen(s.Title) {
+		t.Errorf("after tagging: %+v", s)
+	}
+
+	// off again: back to the AI title, which shows as no rename at all
+	if got := s.ToggledOpen(); got != "Dark mode toggle" {
+		t.Fatalf("toggle off: %q", got)
+	}
+	s.Rename(s.ToggledOpen())
+	if s, _ = scanSession(path, s); s.Title != "Dark mode toggle" || s.Kind != AITitle {
+		t.Errorf("a custom title equal to the AI title is not a rename: %+v", s)
+	}
+
+	// a session without a title starts from its first prompt; any case counts
+	none, _ := scanSession(filepath.Join(dir, idNone+".jsonl"), nil)
+	if got := none.ToggledOpen(); got != "what does this script do [OPEN]" {
+		t.Errorf("untitled: %q", got)
+	}
+	none.Title = "Half done [open] "
+	if got := none.ToggledOpen(); got != "Half done" {
+		t.Errorf("lower-case tag should come off: %q", got)
+	}
+	none.Title = OpenTag
+	if got := none.ToggledOpen(); got != "what does this script do" {
+		t.Errorf("a title that was only the tag falls back to the first prompt: %q", got)
+	}
+	if got := shorten(strings.Repeat("word ", 30), 60); len([]rune(got)) > 61 || !strings.HasSuffix(got, "…") {
+		t.Errorf("long first prompt should be cut: %q", got)
+	}
+
+	// a transcript cut off mid-line, and characters JSON likes to escape
+	appendTo(t, path, `{"type":"user","cut off`)
+	s.Rename("  <A & B>  ")
+	if s, _ = scanSession(path, s); s.Title != "<A & B>" {
+		t.Errorf("record after a half line should still be read: %+v", s)
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), `"customTitle":"<A & B>"`) {
+		t.Errorf("<, > and & should be written as they are:\n%s", b)
+	}
+	if err := s.Rename("   "); err == nil {
+		t.Error("an empty title must be refused")
+	}
+}
+
+func TestRenameUI(t *testing.T) {
+	root := fixture(t)
+	projects, _ := scanAll(nil)
+	m := newModel(projects, filepath.Join(root, "projects/-work-app"))
+	m = send(t, m, tea.WindowSizeMsg{Width: 120, Height: 20})
+	selectID(&m, idAI)
+
+	m = send(t, m, press("t"))
+	if s := screenText(m); !strings.Contains(s, "✎ Dark mode toggle [OPEN]") || !strings.Contains(s, "marked open") {
+		t.Errorf("t should tag the session at once:\n%s", s)
+	}
+	// the / filter finds the open ones
+	m = send(t, m, press("/"))
+	for _, r := range "[open]" {
+		m = send(t, m, press(string(r)))
+	}
+	m = send(t, m, press("enter"))
+	if n := len(m.sessList.VisibleItems()); n != 1 {
+		t.Errorf("/[open] should leave just the tagged session, got %d:\n%s", n, screenText(m))
+	}
+	m = send(t, m, press("esc"))
+	selectID(&m, idAI) // clearing a filter puts the cursor on top
+
+	m = send(t, m, press("t"))
+	if s := screenText(m); strings.Contains(s, "toggle [OPEN]") || !strings.Contains(s, "no longer open") {
+		t.Errorf("t again should take the tag off:\n%s", s)
+	}
+
+	// n starts from the current title; ctrl+u clears it
+	m = send(t, m, press("n"))
+	if s := screenText(m); !strings.Contains(s, "Rename 22222222: Dark mode toggle") {
+		t.Fatalf("expected the rename prompt with the title in it:\n%s", s)
+	}
+	m = send(t, m, tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
+	for _, r := range "Theme work" {
+		m = send(t, m, press(string(r)))
+	}
+	m = send(t, m, press("enter"))
+	if s := screenText(m); !strings.Contains(s, "✎ Theme work") || !strings.Contains(s, "renamed") {
+		t.Errorf("n should rename:\n%s", s)
+	}
+	m = send(t, m, press("n"), press("x"), press("esc"))
+	if s := screenText(m); !strings.Contains(s, "✎ Theme work") || !strings.Contains(s, "not renamed") {
+		t.Errorf("esc should keep the title:\n%s", s)
+	}
+
+	// a running session is left to its own /rename
+	m.selectedSession().LivePID = os.Getpid()
+	m = send(t, m, press("t"))
+	if s := screenText(m); strings.Contains(s, "work [OPEN]") || !strings.Contains(s, "use /rename there") {
+		t.Errorf("a live session must not be renamed:\n%s", s)
+	}
+	m = send(t, m, press("n"))
+	if m.naming != nil {
+		t.Error("no rename prompt for a live session")
+	}
+}
+
+func selectID(m *model, id string) {
+	for i, it := range m.sessList.Items() {
+		if it.(sessionItem).s.ID == id {
+			m.sessList.Select(i)
+		}
+	}
+}

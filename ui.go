@@ -198,6 +198,8 @@ var (
 	keySide    = key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "move preview"))
 	keyCode    = key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "VS Code"))
 	keyDelete  = key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "delete"))
+	keyTag     = key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "tag "+OpenTag))
+	keyName    = key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "rename"))
 	keyBack    = key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "back"))
 	keyRescan  = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rescan"))
 	keyQuit    = key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit"))
@@ -246,6 +248,7 @@ type model struct {
 	sessList list.Model
 	hitList  list.Model
 	confirm  *Session // pending delete, waiting for y/N
+	naming   *Session // being renamed: its new title is typed into input
 	footer   string
 	gen      int // bumped by every delete, so a scan started before it is dropped
 
@@ -330,11 +333,11 @@ func newModel(projects []*Project, startIn string) model {
 			keys(keyOpen, keySearch, keyQuit),
 			keys(keyOpen, keySearch, keyPreview, keySide, keyRescan, keyQuit)),
 		sessList: newList("", 1,
-			keys(keyView, keyResume, keySearch, keyDelete, keyBack),
-			keys(keyView, keyResume, keyCode, keyDelete, keySearch, keyPreview, keySide, keyBack, keyRescan, keyQuit)),
+			keys(keyView, keyResume, keySearch, keyTag, keyDelete, keyBack),
+			keys(keyView, keyResume, keyCode, keyTag, keyName, keyDelete, keySearch, keyPreview, keySide, keyBack, keyRescan, keyQuit)),
 		hitList: newList("", 2,
 			keys(keyView, keyResume, keySearch, keyBack),
-			keys(keyView, keyResume, keyCode, keyDelete, keySearch, keyPreview, keySide, keyBack, keyQuit)),
+			keys(keyView, keyResume, keyCode, keyTag, keyName, keyDelete, keySearch, keyPreview, keySide, keyBack, keyQuit)),
 		preview: true,
 	}
 	m.projList.SetStatusBarItemName("project", "projects")
@@ -451,7 +454,7 @@ func (m *model) refresh(projects []*Project) tea.Cmd {
 		return nil
 	}
 
-	var selProj, selSess, selHit, curDir, confirmID string
+	var selProj, selSess, selHit, curDir, confirmID, namingID string
 	if it, ok := m.projList.SelectedItem().(projectItem); ok {
 		selProj = it.p.Dir
 	}
@@ -467,6 +470,9 @@ func (m *model) refresh(projects []*Project) tea.Cmd {
 	if m.confirm != nil {
 		confirmID = m.confirm.ID
 	}
+	if m.naming != nil {
+		namingID = m.naming.ID
+	}
 
 	// search results keep their hits and point at the new sessions
 	var hits []Hit
@@ -476,6 +482,8 @@ func (m *model) refresh(projects []*Project) tea.Cmd {
 
 	cmd := m.setProjects(projects)
 	m.cur, m.confirm = nil, nil
+	naming := m.naming != nil
+	m.naming = nil
 	for i, p := range projects {
 		if p.Dir == selProj && !m.projList.IsFiltered() {
 			m.projList.Select(i)
@@ -487,7 +495,13 @@ func (m *model) refresh(projects []*Project) tea.Cmd {
 			if s.ID == confirmID {
 				m.confirm = s
 			}
+			if s.ID == namingID {
+				m.naming = s
+			}
 		}
+	}
+	if naming && m.naming == nil {
+		m.footer = "not renamed: the session is gone"
 	}
 	clampCursor(&m.projList)
 
@@ -614,7 +628,7 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		return m, cmd
 
 	case tea.PasteMsg:
-		if m.asking {
+		if m.asking || m.naming != nil {
 			m.input += strings.Join(strings.Fields(msg.Content), " ")
 			return m, nil
 		}
@@ -634,6 +648,9 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 		}
 		if m.asking {
 			return m.typeSearch(msg)
+		}
+		if m.naming != nil {
+			return m.typeName(msg)
 		}
 		l := m.active()
 		if l.SettingFilter() { // typing a filter: every key belongs to the list
@@ -705,6 +722,16 @@ func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 				m.openInCode(s)
 			}
 			return m, nil
+		case "t":
+			if s := m.selectedSession(); s != nil && m.canRename(s) {
+				m.rename(s, s.ToggledOpen())
+			}
+			return m, nil
+		case "n":
+			if s := m.selectedSession(); s != nil && m.canRename(s) {
+				m.naming, m.input = s, s.Title
+			}
+			return m, nil
 		}
 	}
 
@@ -725,16 +752,50 @@ func (m model) typeSearch(msg tea.KeyPressMsg) (model, tea.Cmd) {
 			m.searching = true
 			return m, m.search(q)
 		}
-	case "backspace":
-		if r := []rune(m.input); len(r) > 0 {
-			m.input = string(r[:len(r)-1])
-		}
-	case "ctrl+u":
-		m.input = ""
 	default:
-		m.input += msg.Text
+		m.input = editLine(m.input, msg)
 	}
 	return m, nil
+}
+
+// typeName handles a key while a new title is being typed.
+func (m model) typeName(msg tea.KeyPressMsg) (model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.naming = nil
+		m.footer = "not renamed"
+	case "enter":
+		s := m.naming
+		m.naming = nil
+		switch title := strings.Join(strings.Fields(m.input), " "); {
+		case title == "":
+			m.footer = "not renamed: the title is empty"
+		case title == s.Title:
+			m.footer = "not renamed: the title is the same"
+		default:
+			m.rename(s, title)
+		}
+	default:
+		m.input = editLine(m.input, msg)
+	}
+	return m, nil
+}
+
+// editLine applies a key to the text typed on the bottom line.
+func editLine(input string, msg tea.KeyPressMsg) string {
+	switch msg.String() {
+	case "backspace":
+		if r := []rune(input); len(r) > 0 {
+			return string(r[:len(r)-1])
+		}
+		return input
+	case "ctrl+u":
+		return ""
+	case "ctrl+w": // the last word
+		t := strings.TrimRight(input, " ")
+		return t[:strings.LastIndex(t, " ")+1]
+	}
+	return input + msg.Text
 }
 
 // ---------------------------------------------------------------- layout
@@ -999,6 +1060,9 @@ func (m model) View() tea.View {
 	case m.asking:
 		foot = boldStyle.Render("Search all sessions: ") + m.input + cursorStyle.Render("▌") +
 			dimStyle.Render("  enter searches · esc cancels")
+	case m.naming != nil:
+		foot = boldStyle.Render("Rename "+m.naming.ID[:8]+": ") + m.input + cursorStyle.Render("▌") +
+			dimStyle.Render("  enter renames · esc cancels · ctrl+u clears")
 	case m.searching:
 		foot = noteStyle.Render("searching…")
 	}
@@ -1082,6 +1146,40 @@ func (m *model) openInCode(s *Session) {
 		return
 	}
 	m.footer = "opened " + tildify(out) + " in VS Code"
+}
+
+// canRename refuses a session open in a running Claude Code: that process
+// writes its own idea of the title back into the transcript on every turn.
+func (m *model) canRename(s *Session) bool {
+	if pid := livePID(s); pid != 0 {
+		m.footer = fmt.Sprintf("%s is open in a running Claude Code (pid %d); use /rename there", s.ID[:8], pid)
+		return false
+	}
+	return true
+}
+
+// rename writes the new title and shows it at once, without waiting for the
+// next scan.
+func (m *model) rename(s *Session, title string) {
+	if !m.canRename(s) { // checked again: it may have been resumed meanwhile
+		return
+	}
+	wasOpen := IsOpen(s.Title)
+	if err := s.Rename(title); err != nil {
+		m.footer = "rename: " + err.Error()
+		return
+	}
+	if fresh, err := scanSession(s.Path, s); err == nil {
+		*s = *fresh
+	}
+	switch {
+	case IsOpen(s.Title) && !wasOpen:
+		m.footer = fmt.Sprintf("%s marked open: “%s”", s.ID[:8], s.Title)
+	case wasOpen && !IsOpen(s.Title):
+		m.footer = fmt.Sprintf("%s no longer open: “%s”", s.ID[:8], s.Title)
+	default:
+		m.footer = fmt.Sprintf("%s renamed “%s”", s.ID[:8], s.Title)
+	}
 }
 
 func (m *model) deleteSession(s *Session) tea.Cmd {
